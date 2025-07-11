@@ -1,3 +1,7 @@
+## Usage
+
+`go run main.go`
+
 ### Scratch
 
 ```sh

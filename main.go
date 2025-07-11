@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,8 +12,13 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/joho/godotenv"
+	"github.com/lestrrat-go/jwx/v2/jwk"
 	_ "github.com/lib/pq"
+	"github.com/raystack/frontier/pkg/utils"
+	frontierv1beta1 "github.com/raystack/frontier/proto/v1beta1"
 )
 
 // ANSI color codes
@@ -25,6 +32,15 @@ const (
 	WHITE  = "\033[1;37m"
 	NC     = "\033[0m" // No Color
 )
+
+func generateRequestID() string {
+	buf := make([]byte, 16)
+	_, err := rand.Read(buf)
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(buf)
+}
 
 // AuthRequest represents the authentication request payload
 type AuthRequest struct {
@@ -71,6 +87,43 @@ func listUsersWithToken(accessToken string) (string, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("authorization", "Bearer "+accessToken)
+	req.Header.Set("x-request-id", generateRequestID())
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	printRespHeaders(resp)
+	if err != nil {
+		return "", fmt.Errorf("failed to make API call: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	return string(body), nil
+}
+
+func getOrganizationWithServiceToken(accessToken string) (string, error) {
+	reqBody := map[string]string{
+		"id": "e674dbb1-14b4-4ce9-b834-adc2c34948d3",
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal JSON: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", "http://localhost:8002/raystack.frontier.v1beta1.FrontierService/GetOrganization", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("authorization", "Bearer "+accessToken)
+	req.Header.Set("x-request-id", generateRequestID())
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -185,8 +238,16 @@ func makeAuthRequest(email string) (string, error) {
 		return "", fmt.Errorf("failed to marshal JSON: %w", err)
 	}
 
-	resp, err := http.Post("http://localhost:8002/raystack.frontier.v1beta1.FrontierService/Authenticate",
-		"application/json", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", "http://localhost:8002/raystack.frontier.v1beta1.FrontierService/Authenticate", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("x-request-id", generateRequestID())
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to make authentication request: %w", err)
 	}
@@ -220,14 +281,45 @@ func makeAuthCallback(nonce, state string) (*http.Response, error) {
 		return nil, fmt.Errorf("failed to marshal JSON: %w", err)
 	}
 
-	resp, err := http.Post("http://localhost:8002/raystack.frontier.v1beta1.FrontierService/AuthCallback",
-		"application/json", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", "http://localhost:8002/raystack.frontier.v1beta1.FrontierService/AuthCallback", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("x-request-id", generateRequestID())
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	printRespHeaders(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make authentication callback: %w", err)
 	}
 
 	return resp, nil
+}
+
+// logout makes the API call to logout the user
+func logout(sidCookie string) error {
+	req, err := http.NewRequest("POST", "http://localhost:8002/raystack.frontier.v1beta1.FrontierService/AuthLogout", bytes.NewBuffer([]byte("{}")))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Cookie", "sid="+sidCookie)
+	req.Header.Set("x-request-id", generateRequestID())
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	printRespHeaders(resp)
+	if err != nil {
+		return fmt.Errorf("failed to make API call: %w", err)
+	}
+	defer resp.Body.Close()
+
+	return nil
 }
 
 // listUsers makes the API call to list all users
@@ -240,6 +332,7 @@ func getAuthTokenWithCookie(sidCookie string) (*AuthTokenResponse, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Cookie", "sid="+sidCookie)
+	req.Header.Set("x-request-id", generateRequestID())
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -281,6 +374,7 @@ func listUsersWithCookie(sidCookie string) (string, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Cookie", "sid="+sidCookie)
+	req.Header.Set("x-request-id", generateRequestID())
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -298,7 +392,49 @@ func listUsersWithCookie(sidCookie string) (string, error) {
 	return string(body), nil
 }
 
+type ServiceUserTokenGenerator func() ([]byte, error)
+
+func GetServiceUserTokenGenerator(credential *frontierv1beta1.KeyCredential) (ServiceUserTokenGenerator, error) {
+	// generate a token out of key
+	rsaKey, err := jwk.ParseKey([]byte(credential.GetPrivateKey()), jwk.WithPEM(true))
+	if err != nil {
+		return nil, err
+	}
+	if err = rsaKey.Set(jwk.KeyIDKey, credential.GetKid()); err != nil {
+		return nil, err
+	}
+	return func() ([]byte, error) {
+		return utils.BuildToken(rsaKey, "abhishek-made-this", credential.GetPrincipalId(), time.Hour*12, nil)
+	}, nil
+}
+
+func getSvcAccountAccessToken() (string, error) {
+	cred := &frontierv1beta1.KeyCredential{
+		PrivateKey:  os.Getenv("FRONTIER_PRIVATE_KEY"),
+		Type:        os.Getenv("FRONTIER_KEY_TYPE"),
+		Kid:         os.Getenv("FRONTIER_KEY_ID"),
+		PrincipalId: os.Getenv("FRONTIER_PRINCIPAL_ID"),
+	}
+
+	gen, err := GetServiceUserTokenGenerator(cred)
+	if err != nil {
+		fmt.Println("err----", err)
+		return "", err
+	}
+	x, err := gen()
+	if err != nil {
+		fmt.Println("err##########", err)
+		return "", nil
+	}
+	return string(x), nil
+}
+
 func main() {
+	// Load environment variables from .env file
+	if err := godotenv.Load(); err != nil {
+		logWarning("Error loading .env file")
+	}
+
 	// Check if EMAIL environment variable is set
 	email := os.Getenv("EMAIL")
 	if email == "" {
@@ -397,7 +533,38 @@ func main() {
 		os.Exit(1)
 	}
 
-	logSuccess("API calls completed successfully!")
+	logSuccess("User API calls completed successfully!")
 	logData("Users response (with token): " + userResponseWithToken)
 	logData("Users response (with cookie): " + userResponseWithCookie)
+
+	fmt.Printf("%s🚀 Starting authentication flow for service account: %s%s%s\n", WHITE, YELLOW, "API Test", NC)
+	fmt.Printf("%s==================================================%s\n", WHITE, NC)
+
+	accessToken, err := getSvcAccountAccessToken()
+	if err != nil {
+		logError(fmt.Sprintf("Failed to get svc account access token from the pvt key: %v", err))
+		os.Exit(1)
+	}
+
+	logStep("Step 7: Getting org using Access token of service user...")
+	logInfo("Endpoint: /raystack.frontier.v1beta1.FrontierService/GetOrganization")
+	resp, err := getOrganizationWithServiceToken(accessToken)
+	if err != nil {
+		logError(fmt.Sprintf("Failed to get org with svc user access token: %v", err))
+		os.Exit(1)
+	}
+
+	logSuccess("Svc User API calls completed successfully!")
+	logData("Svc User response (with token): " + resp)
+
+	// Step 8: Logout the user
+	logStep("Step 8: Logging out user...")
+	logInfo("Endpoint: /raystack.frontier.v1beta1.FrontierService/AuthLogout")
+
+	err = logout(sidCookie)
+	if err != nil {
+		logError(fmt.Sprintf("Failed to logout: %v", err))
+		os.Exit(1)
+	}
+	logSuccess("Logged out successfully!")
 }
